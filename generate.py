@@ -134,6 +134,12 @@ def _parse_args():
         default=None,
         help="The file to save the generated video to.")
     parser.add_argument(
+        "--save_fps",
+        type=int,
+        default=None,
+        help="The fps of the saved video. If not specified, will use the sample_fps from the model config."
+    )
+    parser.add_argument(
         "--prompt",
         type=str,
         default=None,
@@ -392,7 +398,7 @@ def generate(args):
         save_video(
             tensor=video[None],
             save_file=args.save_file,
-            fps=cfg.sample_fps,
+            fps=args.save_fps or cfg.sample_fps,
             nrow=1,
             normalize=True,
             value_range=(-1, 1))
