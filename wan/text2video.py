@@ -97,6 +97,9 @@ class WanT2V:
             vae_pth=os.path.join(checkpoint_dir, config.vae_checkpoint),
             device=self.device)
 
+        self.vae.model.encoder.cpu()
+        self.vae.model.decoder.cpu()
+
         logging.info(f"Creating WanModel from {checkpoint_dir}")
         self.low_noise_model = WanModel.from_pretrained(
             checkpoint_dir, subfolder=config.low_noise_checkpoint)
@@ -266,8 +269,9 @@ class WanT2V:
 
         if not self.t5_cpu:
             self.text_encoder.model.to(self.device)
-            context = self.text_encoder([input_prompt], self.device)
-            context_null = self.text_encoder([n_prompt], self.device)
+            with torch.no_grad():
+                context = self.text_encoder([input_prompt], self.device)
+                context_null = self.text_encoder([n_prompt], self.device)
             if offload_model:
                 self.text_encoder.model.cpu()
         else:
@@ -364,7 +368,13 @@ class WanT2V:
                 self.low_noise_model.cpu()
                 self.high_noise_model.cpu()
                 torch.cuda.empty_cache()
-            if self.rank == 0:
+
+        if self.rank == 0:
+            self.vae.model.decoder.to(self.device)
+            with (
+                    torch.amp.autocast('cuda', dtype=self.param_dtype),
+                    torch.no_grad(),
+            ):
                 videos = self.vae.decode(x0)
 
         del noise, latents

@@ -99,6 +99,8 @@ class WanI2V:
         self.vae = Wan2_1_VAE(
             vae_pth=os.path.join(checkpoint_dir, config.vae_checkpoint),
             device=self.device)
+        self.vae.model.encoder.cpu()
+        self.vae.model.decoder.cpu()
 
         logging.info(f"Creating WanModel from {checkpoint_dir}")
         self.low_noise_model = WanModel.from_pretrained(
@@ -301,8 +303,9 @@ class WanI2V:
         # preprocess
         if not self.t5_cpu:
             self.text_encoder.model.to(self.device)
-            context = self.text_encoder([input_prompt], self.device)
-            context_null = self.text_encoder([n_prompt], self.device)
+            with torch.no_grad():
+                context = self.text_encoder([input_prompt], self.device)
+                context_null = self.text_encoder([n_prompt], self.device)
             if offload_model:
                 self.text_encoder.model.cpu()
         else:
@@ -311,16 +314,19 @@ class WanI2V:
             context = [t.to(self.device) for t in context]
             context_null = [t.to(self.device) for t in context_null]
 
-        y = self.vae.encode([
-            torch.concat([
-                torch.nn.functional.interpolate(
-                    img[None].cpu(), size=(h, w), mode='bicubic').transpose(
-                        0, 1),
-                torch.zeros(3, F - 1, h, w)
-            ],
-                         dim=1).to(self.device)
-        ])[0]
-        y = torch.concat([msk, y])
+        self.vae.model.encoder.to(self.device)
+        with torch.no_grad():
+            y = self.vae.encode([
+                torch.concat([
+                    torch.nn.functional.interpolate(
+                        img[None].cpu(), size=(h, w), mode='bicubic').transpose(
+                            0, 1),
+                    torch.zeros(3, F - 1, h, w)
+                ],
+                            dim=1).to(self.device)
+            ])[0]
+            y = torch.concat([msk, y])
+        self.vae.model.encoder.cpu()
 
         @contextmanager
         def noop_no_sync():
@@ -417,7 +423,12 @@ class WanI2V:
                 self.high_noise_model.cpu()
                 torch.cuda.empty_cache()
 
-            if self.rank == 0:
+        if self.rank == 0:
+            self.vae.model.decoder.to(self.device)
+            with (
+                    torch.amp.autocast('cuda', dtype=self.param_dtype),
+                    torch.no_grad(),
+            ):
                 videos = self.vae.decode(x0)
 
         del noise, latent, x0
