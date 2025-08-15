@@ -58,6 +58,7 @@ class WanVideoGenerator:
                     dit_fsdp=False,
                     use_sp=False,
                     t5_cpu=t5_cpu,
+                    init_on_cpu=True,
                     convert_model_dtype=convert_model_dtype,
                 )
             elif "ti2v" in task:
@@ -70,6 +71,7 @@ class WanVideoGenerator:
                     dit_fsdp=False,
                     use_sp=False,
                     t5_cpu=t5_cpu,
+                    init_on_cpu=True,
                     convert_model_dtype=convert_model_dtype,
                 )
             else:  # i2v-A14B
@@ -82,6 +84,7 @@ class WanVideoGenerator:
                     dit_fsdp=False,
                     use_sp=False,
                     t5_cpu=t5_cpu,
+                    init_on_cpu=True,
                     convert_model_dtype=convert_model_dtype,
                 )
 
@@ -133,8 +136,8 @@ class WanVideoGenerator:
 
             # 初始化或重用pipeline
             self._init_pipeline(task, ckpt_dir, device_id=0, rank=0, 
-                              t5_cpu=t5_cpu, convert_model_dtype=convert_model_dtype,
-                              progress_callback=progress)
+                                t5_cpu=t5_cpu, convert_model_dtype=convert_model_dtype,
+                                progress_callback=progress)
 
             progress(0.25, desc="准备生成参数...")
 
@@ -152,7 +155,6 @@ class WanVideoGenerator:
                     seed=base_seed,
                     offload_model=offload_model
                 )
-
             elif "ti2v" in task:
                 # 处理输入图像（可选）
                 img = None
@@ -198,12 +200,10 @@ class WanVideoGenerator:
 
             progress(0.8, desc="推理完成，准备保存...")
 
-            progress(0.85, desc="保存视频文件...")
-
             # 生成输出文件名
             formatted_time = datetime.now().strftime("%Y%m%d_%H%M%S")
             formatted_prompt = prompt.replace(" ", "_").replace("/", "_")[:50]
-            
+
             # 根据帧数决定保存格式
             if frame_num == 1:
                 output_path = f"{task}_{size.replace('*','x')}_{formatted_prompt}_{formatted_time}.png"
@@ -266,11 +266,18 @@ def create_gradio_interface():
     def update_image_visibility(task):
         return gr.Image(visible=task in ["i2v-A14B", "ti2v-5B"])
     
-    def generate_video_wrapper(task, size, prompt, image, ckpt_dir, 
+    def generate_video_wrapper(task, size, prompt, image,
                               sample_steps, sample_shift, sample_guide_scale, 
                               frame_num, base_seed, offload_model, t5_cpu, 
                               convert_model_dtype, progress=gr.Progress()):
         """包装函数，处理输出显示"""
+        CKPT_DIRS = {
+            "t2v-A14B": "./Wan2.2-T2V-A14B",
+            "i2v-A14B": "./Wan2.2-I2V-A14B",
+            "ti2v-5B": "./Wan2.2-TI2V-5B"
+        }
+        ckpt_dir = CKPT_DIRS[task]
+
         result_path, info = generator.generate_video(
             task, size, prompt, image, ckpt_dir,
             sample_steps, sample_shift, sample_guide_scale,
@@ -312,12 +319,6 @@ def create_gradio_interface():
                     value="1280*704",
                     label="视频尺寸",
                     info="生成视频的分辨率"
-                )
-
-                ckpt_dir = gr.Textbox(
-                    value="./Wan2.2-TI2V-5B",
-                    label="模型检查点目录",
-                    info="模型权重文件的路径"
                 )
 
                 prompt = gr.Textbox(
@@ -446,7 +447,7 @@ def create_gradio_interface():
         generate_btn.click(
             fn=generate_video_wrapper,
             inputs=[
-                task, size, prompt, image, ckpt_dir,
+                task, size, prompt, image,
                 sample_steps, sample_shift, sample_guide_scale,
                 frame_num, base_seed, offload_model, t5_cpu,
                 convert_model_dtype
@@ -480,14 +481,17 @@ def create_gradio_interface():
     return demo
 
 if __name__ == "__main__":
+    from generate import _init_logging
+    _init_logging(0)
+
     # 创建Gradio界面
     demo = create_gradio_interface()
 
     # 启动服务
     demo.launch(
         server_name="0.0.0.0",  # 允许外部访问
-        server_port=7860,       # 端口
-        share=False,            # 是否创建公共链接
-        debug=True,             # 调试模式
+        server_port=8077,       # 端口
+        share=True,            # 是否创建公共链接
+        debug=False,             # 调试模式
         show_error=True         # 显示错误信息
     )
