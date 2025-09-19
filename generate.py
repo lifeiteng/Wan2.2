@@ -167,6 +167,12 @@ def _parse_args():
         choices=["zh", "en"],
         help="The target language of prompt extend.")
     parser.add_argument(
+        "--csv_file",
+        type=str,
+        default=None,
+        help="The csv file containing the generation parameters, including base_seed[optional], image, prompt, save_file and size."
+    ) 
+    parser.add_argument(
         "--base_seed",
         type=int,
         default=-1,
@@ -272,137 +278,160 @@ def generate(args):
     logging.info(f"Generation job args: {args}")
     logging.info(f"Generation model config: {cfg}")
 
-    if dist.is_initialized():
-        base_seed = [args.base_seed] if rank == 0 else [None]
-        dist.broadcast_object_list(base_seed, src=0)
-        args.base_seed = base_seed[0]
+    args_list = [args]
+    if args.csv_file:
+        import pandas as pd
+        df = pd.read_csv(args.csv_file)
+        args_list = []
+        for i, row in df.iterrows():
+            arg_dict = vars(args).copy()
+            for key in row.index:
+                if key in arg_dict:
+                    arg_dict[key] = row[key]
+            _validate_args(argparse.Namespace(**arg_dict))
+            args_list.append(argparse.Namespace(**arg_dict))
+        logging.info(f"Total {len(args_list)} rows loaded from {args.csv_file}.")
 
-    logging.info(f"Input prompt: {args.prompt}")
-    img = None
-    if args.image is not None:
-        img = Image.open(args.image).convert("RGB")
-        logging.info(f"Input image: {args.image}")
 
-    # prompt extend
-    if args.use_prompt_extend:
-        logging.info("Extending prompt ...")
-        if rank == 0:
-            prompt_output = prompt_expander(
-                args.prompt,
-                image=img,
-                tar_lang=args.prompt_extend_target_lang,
-                seed=args.base_seed)
-            if prompt_output.status == False:
-                logging.info(
-                    f"Extending prompt failed: {prompt_output.message}")
-                logging.info("Falling back to original prompt.")
-                input_prompt = args.prompt
-            else:
-                input_prompt = prompt_output.prompt
-            input_prompt = [input_prompt]
-        else:
-            input_prompt = [None]
+    wan_t2v, wan_ti2v, wan_i2v = None, None, None
+    for k, args in enumerate(args_list):
+        if len(args_list) > 1:
+            logging.info(f"Processing {k}-th row with args: {args.task} {args.size=} {args.image=} {args.prompt=} {args.save_file=}")
+
         if dist.is_initialized():
-            dist.broadcast_object_list(input_prompt, src=0)
-        args.prompt = input_prompt[0]
-        logging.info(f"Extended prompt: {args.prompt}")
+            base_seed = [args.base_seed] if rank == 0 else [None]
+            dist.broadcast_object_list(base_seed, src=0)
+            args.base_seed = base_seed[0]
 
-    if "t2v" in args.task:
-        logging.info("Creating WanT2V pipeline.")
-        wan_t2v = wan.WanT2V(
-            config=cfg,
-            checkpoint_dir=args.ckpt_dir,
-            device_id=device,
-            rank=rank,
-            t5_fsdp=args.t5_fsdp,
-            dit_fsdp=args.dit_fsdp,
-            use_sp=(args.ulysses_size > 1),
-            t5_cpu=args.t5_cpu,
-            convert_model_dtype=args.convert_model_dtype,
-        )
+        logging.info(f"Input prompt: {args.prompt}")
+        img = None
+        if args.image is not None:
+            img = Image.open(args.image).convert("RGB")
+            logging.info(f"Input image: {args.image}")
 
-        logging.info(f"Generating video ...")
-        video = wan_t2v.generate(
-            args.prompt,
-            size=SIZE_CONFIGS[args.size],
-            frame_num=args.frame_num,
-            shift=args.sample_shift,
-            sample_solver=args.sample_solver,
-            sampling_steps=args.sample_steps,
-            guide_scale=args.sample_guide_scale,
-            seed=args.base_seed,
-            offload_model=args.offload_model)
-    elif "ti2v" in args.task:
-        logging.info("Creating WanTI2V pipeline.")
-        wan_ti2v = wan.WanTI2V(
-            config=cfg,
-            checkpoint_dir=args.ckpt_dir,
-            device_id=device,
-            rank=rank,
-            t5_fsdp=args.t5_fsdp,
-            dit_fsdp=args.dit_fsdp,
-            use_sp=(args.ulysses_size > 1),
-            t5_cpu=args.t5_cpu,
-            convert_model_dtype=args.convert_model_dtype,
-        )
+        # prompt extend
+        if args.use_prompt_extend:
+            logging.info("Extending prompt ...")
+            if rank == 0:
+                prompt_output = prompt_expander(
+                    args.prompt,
+                    image=img,
+                    tar_lang=args.prompt_extend_target_lang,
+                    seed=args.base_seed)
+                if prompt_output.status == False:
+                    logging.info(
+                        f"Extending prompt failed: {prompt_output.message}")
+                    logging.info("Falling back to original prompt.")
+                    input_prompt = args.prompt
+                else:
+                    input_prompt = prompt_output.prompt
+                input_prompt = [input_prompt]
+            else:
+                input_prompt = [None]
+            if dist.is_initialized():
+                dist.broadcast_object_list(input_prompt, src=0)
+            args.prompt = input_prompt[0]
+            logging.info(f"Extended prompt: {args.prompt}")
 
-        logging.info(f"Generating video ...")
-        video = wan_ti2v.generate(
-            args.prompt,
-            img=img,
-            size=SIZE_CONFIGS[args.size],
-            max_area=MAX_AREA_CONFIGS[args.size],
-            frame_num=args.frame_num,
-            shift=args.sample_shift,
-            sample_solver=args.sample_solver,
-            sampling_steps=args.sample_steps,
-            guide_scale=args.sample_guide_scale,
-            seed=args.base_seed,
-            offload_model=args.offload_model)
-    else:
-        logging.info("Creating WanI2V pipeline.")
-        wan_i2v = wan.WanI2V(
-            config=cfg,
-            checkpoint_dir=args.ckpt_dir,
-            device_id=device,
-            rank=rank,
-            t5_fsdp=args.t5_fsdp,
-            dit_fsdp=args.dit_fsdp,
-            use_sp=(args.ulysses_size > 1),
-            t5_cpu=args.t5_cpu,
-            convert_model_dtype=args.convert_model_dtype,
-        )
+        if "t2v" in args.task:
+            if wan_t2v is None:
+                logging.info("Creating WanT2V pipeline.")
+                wan_t2v = wan.WanT2V(
+                    config=cfg,
+                    checkpoint_dir=args.ckpt_dir,
+                    device_id=device,
+                    rank=rank,
+                    t5_fsdp=args.t5_fsdp,
+                    dit_fsdp=args.dit_fsdp,
+                    use_sp=(args.ulysses_size > 1),
+                    t5_cpu=args.t5_cpu,
+                    convert_model_dtype=args.convert_model_dtype,
+                )
 
-        logging.info("Generating video ...")
-        video = wan_i2v.generate(
-            args.prompt,
-            img,
-            max_area=MAX_AREA_CONFIGS[args.size],
-            frame_num=args.frame_num,
-            shift=args.sample_shift,
-            sample_solver=args.sample_solver,
-            sampling_steps=args.sample_steps,
-            guide_scale=args.sample_guide_scale,
-            seed=args.base_seed,
-            offload_model=args.offload_model)
+            logging.info(f"Generating video ...")
+            video = wan_t2v.generate(
+                args.prompt,
+                size=SIZE_CONFIGS[args.size],
+                frame_num=args.frame_num,
+                shift=args.sample_shift,
+                sample_solver=args.sample_solver,
+                sampling_steps=args.sample_steps,
+                guide_scale=args.sample_guide_scale,
+                seed=args.base_seed,
+                offload_model=args.offload_model)
+        elif "ti2v" in args.task:
+            if wan_ti2v is None:
+                logging.info("Creating WanTI2V pipeline.")
+                wan_ti2v = wan.WanTI2V(
+                    config=cfg,
+                    checkpoint_dir=args.ckpt_dir,
+                    device_id=device,
+                    rank=rank,
+                    t5_fsdp=args.t5_fsdp,
+                    dit_fsdp=args.dit_fsdp,
+                    use_sp=(args.ulysses_size > 1),
+                    t5_cpu=args.t5_cpu,
+                    convert_model_dtype=args.convert_model_dtype,
+                )
 
-    if rank == 0:
-        if args.save_file is None:
-            formatted_time = datetime.now().strftime("%Y%m%d_%H%M%S")
-            formatted_prompt = args.prompt.replace(" ", "_").replace("/",
-                                                                     "_")[:50]
-            suffix = '.mp4'
-            args.save_file = f"{args.task}_{args.size.replace('*','x') if sys.platform=='win32' else args.size}_{args.ulysses_size}_{formatted_prompt}_{formatted_time}" + suffix
+            logging.info(f"Generating video ...")
+            video = wan_ti2v.generate(
+                args.prompt,
+                img=img,
+                size=SIZE_CONFIGS[args.size],
+                max_area=MAX_AREA_CONFIGS[args.size],
+                frame_num=args.frame_num,
+                shift=args.sample_shift,
+                sample_solver=args.sample_solver,
+                sampling_steps=args.sample_steps,
+                guide_scale=args.sample_guide_scale,
+                seed=args.base_seed,
+                offload_model=args.offload_model)
+        else:
+            if wan_i2v is None:
+                logging.info("Creating WanI2V pipeline.")
+                wan_i2v = wan.WanI2V(
+                    config=cfg,
+                    checkpoint_dir=args.ckpt_dir,
+                    device_id=device,
+                    rank=rank,
+                    t5_fsdp=args.t5_fsdp,
+                    dit_fsdp=args.dit_fsdp,
+                    use_sp=(args.ulysses_size > 1),
+                    t5_cpu=args.t5_cpu,
+                    convert_model_dtype=args.convert_model_dtype,
+                )
 
-        logging.info(f"Saving generated video to {args.save_file}")
-        save_video(
-            tensor=video[None],
-            save_file=args.save_file,
-            fps=args.save_fps or cfg.sample_fps,
-            nrow=1,
-            normalize=True,
-            value_range=(-1, 1))
-    del video
+            logging.info("Generating video ...")
+            video = wan_i2v.generate(
+                args.prompt,
+                img,
+                max_area=MAX_AREA_CONFIGS[args.size],
+                frame_num=args.frame_num,
+                shift=args.sample_shift,
+                sample_solver=args.sample_solver,
+                sampling_steps=args.sample_steps,
+                guide_scale=args.sample_guide_scale,
+                seed=args.base_seed,
+                offload_model=args.offload_model)
+
+        if rank == 0:
+            if args.save_file is None:
+                formatted_time = datetime.now().strftime("%Y%m%d_%H%M%S")
+                formatted_prompt = args.prompt.replace(" ", "_").replace("/",
+                                                                        "_")[:50]
+                suffix = '.mp4'
+                args.save_file = f"{args.task}_{args.size.replace('*','x') if sys.platform=='win32' else args.size}_{args.ulysses_size}_{formatted_prompt}_{formatted_time}" + suffix
+
+            logging.info(f"Saving generated video to {args.save_file}")
+            save_video(
+                tensor=video[None],
+                save_file=args.save_file,
+                fps=args.save_fps or cfg.sample_fps,
+                nrow=1,
+                normalize=True,
+                value_range=(-1, 1))
+        del video
 
     torch.cuda.synchronize()
     if dist.is_initialized():
